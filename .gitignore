@@ -1,0 +1,10 @@
+test/
+model/
+1208/
+.vscode/
+data/
+.obsidian/
+*.bkp
+unsloth_compiled_cache/
+knowledge/
+.images/
