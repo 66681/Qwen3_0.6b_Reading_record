@@ -136,6 +136,7 @@ class TransformerBlock(nn.Module):
                                  cache=cache)  # Shape [batch_size, num_tokens, hidden_size]
         x = x + shortcut  # 进行残差连接
 
+        # x : (8 * 68 * 1024)
         # 保存输入，用于后面进行残差连接（FFN的残差连接）
         shortcut = x
         x = self.norm2(x)
@@ -287,7 +288,12 @@ class GroupedQueryAttention(nn.Module):
         return self.o_proj(context), next_cache
 
 
-def compute_rope_params(head_dim, theta_base=10_000, context_length=4096, dtype=torch.float32):
+def compute_rope_params(
+        head_dim,   #128
+        theta_base=10_000,
+        context_length=4096,
+        dtype=torch.float32
+):
     """
     计算每个位置的余弦值和正弦值，用于旋转位置编码
     head_dim假设等于8：
@@ -299,26 +305,35 @@ def compute_rope_params(head_dim, theta_base=10_000, context_length=4096, dtype=
     assert head_dim % 2 == 0, "Embedding dimension must be even"
 
     # 1. 生成频率下标：0, 2, 4, ..., head_dim-2，总数为head_dim//2
-    # torch.arange: 生成一维张量，[)
+    # torch.arange: 生成一维张量，[]
+    # 2i
+    # (head_dim // 2,)
     freq_indices = torch.arange(0, head_dim, 2, dtype=dtype)
 
     # 2. 转成浮点，并除以 head_dim，得到指数
+    # 2i//d
+    # (head_dim // 2,)
     exponents = freq_indices.float() / head_dim
 
     # 3. 计算 theta_base 的这些指数次幂
+    # 100000 ^ 2i//d
+    # (head_dim // 2,)
     scales = theta_base ** exponents
 
     # 4. 取倒数，得到 inverse frequencies
+    # 1/  (100000 ^ 2i//d)
+    # (head_dim // 2,)
     inv_freq = 1.0 / scales
 
     # 计算位置索引：[0,1,2,3,...,context_length-1] shape: (context_length,)
     positions = torch.arange(context_length, dtype=dtype)
 
     # 计算每个位置的每组旋转的角度
-    # positions.unsqueeze(1): (context_length,1)
-    # inv_freq.unsqueeze(0): (1,head_dim // 2)
+    # positions.unsqueeze(1): (context_length,1) [[0],[1],[2],...]
+    # inv_freq.unsqueeze(0): (1,head_dim // 2)  [[100_0000 ** (0/head_dim)],[100_0000 ** (-2/head_dim)],...]
     # angles: (context_length, head_dim // 2)
     # angles[0,0]=序列中第0个位置处，第0组分量的旋转角度，对应的就是m * theta_i
+    # (context_length,1)  *  (1,head_dim // 2)
     angles = positions.unsqueeze(1) * inv_freq.unsqueeze(0)  # Shape: (context_length, head_dim // 2)
 
     # 将angles扩展到head_dim维度，shape: (context_length, head_dim)
