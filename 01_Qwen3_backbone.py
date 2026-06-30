@@ -49,10 +49,11 @@ class Qwen3Model(nn.Module):
         else:
             head_dim = cfg["head_dim"]
         # 获取到每个位置的每组向量的旋转的余弦值和正弦值
+        # (context_length, head_dim)
         cos, sin = compute_rope_params(
-            head_dim=head_dim,
-            theta_base=cfg["rope_theta"],
-            context_length=cfg["max_position_embeddings"]
+            head_dim=head_dim,  #128
+            theta_base=cfg["rope_theta"],  # 1_000_000.0
+            context_length=cfg["max_position_embeddings"]  # 40_960
         )
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)
@@ -60,13 +61,15 @@ class Qwen3Model(nn.Module):
         self.current_pos = 0  # 追踪KV Cache 当前位置的索引
 
     def forward(self, in_idx, cache=None):
-        # in_idx：shape:[batch_size, num_tokens]
+        # in_idx：shape:[batch_size, seq_len]
         # 前向传播
 
         # 输入层：获取到token_embedding
+        # [batch_size, seq_len, embedding_dim]
         tok_embeds = self.tok_emb(in_idx)
-        x = tok_embeds  # shape: [batch_size, num_tokens, hidden_size / embed_dim]
-
+        # [8,26,1024]
+        x = tok_embeds  # shape: [batch_size, seq_len, embedding_dim]
+        # 26
         num_tokens = x.shape[1]
         if cache is not None and len(cache) > 0:  # decode阶段
             pos_start = self.current_pos
@@ -78,7 +81,9 @@ class Qwen3Model(nn.Module):
             )[pos_start:pos_end, :pos_end]
         else:  # prefill阶段
             pos_start = 0
+            # [seq,seq]
             mask = torch.triu(
+                # 26 * 26 提取上三角矩阵，下三角及对角线为0
                 torch.ones(num_tokens, num_tokens, device=x.device, dtype=torch.bool), diagonal=1
             )
             self.current_pos = num_tokens
@@ -86,6 +91,7 @@ class Qwen3Model(nn.Module):
         # 扩展mask到[1, 1, query_len, key_value_len]，方便广播到每个batch和每个head
         mask = mask.unsqueeze(0).unsqueeze(0)
 
+        # i是第i层,第i个block块
         for i, block in enumerate(self.trf_blocks):
             # prefill阶段，cache传进来的是空字典{}；decode阶段，cache里已经有每一层的KV Cache
             blk_cache = cache.get(i) if cache is not None else None
@@ -216,6 +222,9 @@ class GroupedQueryAttention(nn.Module):
             self.q_norm = self.k_norm = None
 
     def forward(self, x, mask, cos, sin, start_pos=0, cache=None):
+        # cache
+        #
+
         # [batch_size, seq_len, embedding_dim]
         # (8,68,1024)
         b, num_tokens, _ = x.shape
@@ -289,7 +298,7 @@ class GroupedQueryAttention(nn.Module):
 
 
 def compute_rope_params(
-        head_dim,   #128
+        head_dim,  # 128
         theta_base=10_000,
         context_length=4096,
         dtype=torch.float32
@@ -334,9 +343,12 @@ def compute_rope_params(
     # angles: (context_length, head_dim // 2)
     # angles[0,0]=序列中第0个位置处，第0组分量的旋转角度，对应的就是m * theta_i
     # (context_length,1)  *  (1,head_dim // 2)
+    # (context_length, head_dim // 2)
+    # (4096,64)
     angles = positions.unsqueeze(1) * inv_freq.unsqueeze(0)  # Shape: (context_length, head_dim // 2)
 
     # 将angles扩展到head_dim维度，shape: (context_length, head_dim)
+    # # (4096,128)
     angles = torch.cat([angles, angles], dim=1)  # Shape: (context_length, head_dim)
     # head_dim=8时，一行会变成：[angle_0, angle_1, angle_2, angle_3, angle_0, angle_1, angle_2, angle_3]
     # 这样刚好匹配apply_rope里的前半/后半配对方式
@@ -384,6 +396,8 @@ def apply_rope(x, cos, sin, offset=0):
             rotate_half(x) = [-x4, -x5, -x6, -x7, x0, x1, x2, x3]
         最终计算：
             x_rotated = x * cos + rotate_half(x) * sin
+        旋转矩阵：
+          [x0',x4'] =[x0,x4] @ [[cos,sin],[-sin,cos]]
         展开后就是：
             x0' = x0*cos(a0) - x4*sin(a0)
             x4' = x4*cos(a0) + x0*sin(a0)
@@ -524,7 +538,12 @@ class Qwen3Tokenizer:
         return s
 
 
-def generate_text(input_ids, model: Qwen3Model, tokenizer: Qwen3Tokenizer, max_len: int = 100):
+def generate_text(
+        input_ids,  # [batch_size,seq_len]
+        model: Qwen3Model,
+        tokenizer: Qwen3Tokenizer,
+        max_len: int = 100
+):
     # 每次调用时，重置一下current_pos位置的值
     model.reset_kv_cache()
     generated_token = 0
@@ -534,10 +553,17 @@ def generate_text(input_ids, model: Qwen3Model, tokenizer: Qwen3Tokenizer, max_l
     with torch.no_grad():
         # 1、prefill阶段
         # output_logits: shape:[batch_size,seq_len,vocab_size]
+        # 将生成的[batch_size,seq_len,embedding_dim]映射回字典[batch_size,seq_len,vocab_size]
         output_logits = model(input_ids, cache=kv_cache)
-
+        # [batch_size, vocab_size]
         logits = output_logits[:, -1, :]
+        # 将原始的 logits（未归一化的分数）转换成概率分布。
         probs = torch.softmax(logits, dim=-1)
+        # 采用抽样策略
+        # multinomial，你有
+        # 假设 probs 里只有三个词的概率：[0.7, 0.2, 0.1]
+        # 70 % 的概率抽到0，20 % 的概率抽到1，10 % 的概率抽到2
+        # [batch_size, ]
         next_token_id = torch.multinomial(probs, num_samples=1).squeeze(-1)
 
         generated_token += 1
@@ -547,8 +573,10 @@ def generate_text(input_ids, model: Qwen3Model, tokenizer: Qwen3Tokenizer, max_l
         next_input = next_token_id.unsqueeze(-1)
 
         final_output = torch.cat([final_output, next_input], dim=-1)
+        # 自回归生成截至条件，到达最大长度，或者生成了EOS_TOKEN
         while generated_token < max_len:
             # 当前KV_Cache就不是空字典了，当前这个dict中的键，就是不同的TransformerBlock的层，值就是这一层所对应的KV Cache
+            # [batch_size,seq_len,vocab_size]
             output_logits = model(next_input, kv_cache)
 
             logits = output_logits[:, -1, :]
