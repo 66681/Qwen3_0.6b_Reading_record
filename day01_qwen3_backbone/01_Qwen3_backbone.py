@@ -454,11 +454,17 @@ class RMSNorm(nn.Module):
         self.scale = nn.Parameter(torch.ones(emb_dim))
 
     def forward(self, x):
+        # 假设输入的是Q矩阵，那么x的shape为：(batch_size, num_heads, seq_len, head_dim)
+        # x: (8, 16, 68, 128)
         input_dtype = x.dtype
         if self.qwen3_compatible:
+            # qwen的类型转换 fp32更准确
             x = x.to(torch.float32)
+        # 对于最后一个维度求平方,保持维度不变
         variance = x.pow(2).mean(dim=-1, keepdim=True)
+        # 开方取倒数
         norm_x = x * torch.rsqrt(variance + self.eps)
+        # 乘以缩放因子
         norm_x = norm_x * self.scale
         return norm_x.to(input_dtype)
 

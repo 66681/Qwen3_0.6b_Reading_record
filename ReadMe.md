@@ -47,4 +47,6 @@ uv pip install -r requirements.txt
 > - 本项目已有 `requirements.txt` 维护依赖列表，用 `uv pip install` 直接从文件安装即可，不修改 `pyproject.toml`
 > - PyTorch 用了自定义 CUDA 索引，`uv pip install` 可以直接传 `--index-url`
 
- 
+###  Qwen3与传统transformer有什么区别：
+
+GQA pre Normalization QK 做了Normalization 并且Normalization采用RMSnormalization 
